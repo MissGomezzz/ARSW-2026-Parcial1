@@ -10,6 +10,8 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.Collections;
+
 
 /**
  *
@@ -18,6 +20,9 @@ import java.util.logging.Logger;
 public class HostBlackListsValidator {
 
     private static final int BLACK_LIST_ALARM_COUNT=5;
+    private int nThreads; 
+    private LinkedList<Integer> blacklists = new LinkedList<>(); 
+    private SearchingThread searchingThread; 
     
     /**
      * Check the given host's IP address in all the available black lists,
@@ -29,23 +34,41 @@ public class HostBlackListsValidator {
      * @param ipaddress suspicious host's IP address.
      * @return  Blacklists numbers where the given host's IP address was found.
      */
-    public List<Integer> checkHost(String ipaddress){
+    public List<Integer> checkHost(String ipaddress, int nThreads) { // adding attribute of number of threads 
         
-        LinkedList<Integer> blackListOcurrences=new LinkedList<>();
-        
+        LinkedList<Integer> blackListOcurrences= new LinkedList<>();
+
+        LinkedList<SearchingThread> threads = new LinkedList<>();
+
         int ocurrencesCount=0;
         
         HostBlacklistsDataSourceFacade skds=HostBlacklistsDataSourceFacade.getInstance();
         
         int checkedListsCount=0;
+
+        // Segmenting the ip servers into the number of threads 
+        SearchingThread thread; 
+        int numberServers = skds.getRegisteredServersCount(); 
+        int range = numberServers/nThreads; 
+        int residue = numberServers % nThreads; 
+
+        // Creation of threads knowing the range 
+
+        for (int i=0; i < range -1 ; i++) { 
+            SearchingThread thread1 = new SearchingThread(range*(i-1),range*(i),ipaddress,skds,0);
+            thread1.start();
+        }
+        // Managing the last scenario 
+        SearchingThread lastThread = new SearchingThread(numberServers-range,numberServers,ipaddress,skds,0);
+        lastThread.start(); 
+        
         
         for (int i=0;i<skds.getRegisteredServersCount() && ocurrencesCount<BLACK_LIST_ALARM_COUNT;i++){
             checkedListsCount++;
             
             if (skds.isInBlackListServer(i, ipaddress)){
-                
+
                 blackListOcurrences.add(i);
-                
                 ocurrencesCount++;
             }
         }
@@ -61,10 +84,9 @@ public class HostBlackListsValidator {
         
         return blackListOcurrences;
     }
-    
-    
+
+
     private static final Logger LOG = Logger.getLogger(HostBlackListsValidator.class.getName());
-    
     
     
 }
