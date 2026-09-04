@@ -21,7 +21,7 @@ public class HostBlackListsValidator {
 
     private static final int BLACK_LIST_ALARM_COUNT=5;
     private int nThreads; 
-    private LinkedList<Integer> blacklists = new LinkedList<>(); 
+    private LinkedList<Integer> blacklists = (new LinkedList<>()); 
     private SearchingThread searchingThread; 
     
     /**
@@ -84,9 +84,6 @@ public class HostBlackListsValidator {
         
         return blackListOcurrences;
     }
-
-
     private static final Logger LOG = Logger.getLogger(HostBlackListsValidator.class.getName());
-    
     
 }
