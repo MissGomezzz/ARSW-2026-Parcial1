@@ -16,9 +16,7 @@ public class SearchingThread extends Thread {
     private final HostBlackListsValidator validator; // referencia al estado compartido
     private final HostBlacklistsDataSourceFacade skds;
 
-    public SearchingThread(int a, int b, String ipaddress,
-                            HostBlackListsValidator validator,
-                            HostBlacklistsDataSourceFacade skds) {
+    public SearchingThread(int a, int b, String ipaddress,HostBlackListsValidator validator, HostBlacklistsDataSourceFacade skds) {
         this.a = a;
         this.b = b;
         this.ipaddress = ipaddress;
