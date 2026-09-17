@@ -1,89 +1,112 @@
-/*
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
 package edu.eci.arsw.blacklistvalidator;
 
-import edu.eci.arsw.spamkeywordsdatasource.HostBlacklistsDataSourceFacade;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import java.util.Collections;
 
+import edu.eci.arsw.spamkeywordsdatasource.HostBlacklistsDataSourceFacade;
 
-/**
- *
- * @author hcadavid
- */
 public class HostBlackListsValidator {
 
-    private static final int BLACK_LIST_ALARM_COUNT=5;
-    private int nThreads; 
-    private LinkedList<Integer> blacklists = (new LinkedList<>()); 
-    private SearchingThread searchingThread; 
-    
+    private static final int BLACK_LIST_ALARM_COUNT = 5;
+    private static final Logger LOG = Logger.getLogger(HostBlackListsValidator.class.getName());
+
+    // --- Estado COMPARTIDO entre todos los SearchingThread ---
+    // Por eso cualquier método que lo lea o modifique debe ser synchronized.
+    private int ocurrencesCount = 0;
+    private final LinkedList<Integer> blackListOcurrences = new LinkedList<>();
+
+    private final HostBlacklistsDataSourceFacade skds = HostBlacklistsDataSourceFacade.getInstance();
+
     /**
-     * Check the given host's IP address in all the available black lists,
-     * and report it as NOT Trustworthy when such IP was reported in at least
-     * BLACK_LIST_ALARM_COUNT lists, or as Trustworthy in any other case.
-     * The search is not exhaustive: When the number of occurrences is equal to
-     * BLACK_LIST_ALARM_COUNT, the search is finished, the host reported as
-     * NOT Trustworthy, and the list of the five blacklists returned.
-     * @param ipaddress suspicious host's IP address.
-     * @return  Blacklists numbers where the given host's IP address was found.
+     * Llamado por CUALQUIER SearchingThread cuando encuentra la IP en una
+     * blacklist. synchronized garantiza que solo un hilo a la vez ejecuta
+     * este bloque -> sin esto, dos hilos podrían hacer ocurrencesCount++
+     * "al mismo tiempo" y perder un incremento (race condition clásica).
      */
-    public List<Integer> checkHost(String ipaddress, int nThreads) { // adding attribute of number of threads 
-        
-        LinkedList<Integer> blackListOcurrences= new LinkedList<>();
+    public synchronized void reportOcurrence(int serverIndex) {
+        ocurrencesCount++;
+        blackListOcurrences.add(serverIndex);
+    }
 
-        LinkedList<SearchingThread> threads = new LinkedList<>();
+    /**
+     * También synchronized: si no lo fuera, un hilo podría leer
+     * ocurrencesCount justo mientras otro hilo está a la mitad de
+     * reportOcurrence(), y leer un valor "a medias" o desactualizado
+     * (esto se llama un problema de visibilidad de memoria entre hilos,
+     * no solo de exclusión mutua). synchronized en AMBOS métodos soluciona
+     * ambos problemas (exclusión + visibilidad) a la vez.
+     */
+    public synchronized boolean alarmThresholdReached() {
+        return ocurrencesCount >= BLACK_LIST_ALARM_COUNT;
+    }
 
-        int ocurrencesCount=0;
-        
-        HostBlacklistsDataSourceFacade skds=HostBlacklistsDataSourceFacade.getInstance();
-        
-        int checkedListsCount=0;
+    public synchronized int getOcurrencesCount() {
+        return ocurrencesCount;
+    }
 
-        // Segmenting the ip servers into the number of threads 
-        SearchingThread thread; 
-        int numberServers = skds.getRegisteredServersCount(); 
-        int range = numberServers/nThreads; 
-        int residue = numberServers % nThreads; 
+    /**
+     * Reparte [0, numberServers) en nThreads segmentos lo más parejos
+     * posible, repartiendo el residuo (numberServers % nThreads) en los
+     * primeros 'residue' segmentos, uno de más cada uno.
+     * Esto reemplaza tu cálculo anterior (range*(i-1)) que podía dar
+     * índices negativos y dejaba servidores sin cubrir.
+     */
+    public List<Integer> checkHost(String ipaddress, int nThreads) {
 
-        // Creation of threads knowing the range 
+        int numberServers = skds.getRegisteredServersCount();
+        int base = numberServers / nThreads;
+        int residue = numberServers % nThreads;
 
-        for (int i=0; i < range -1 ; i++) { 
-            SearchingThread thread1 = new SearchingThread(range*(i-1),range*(i),ipaddress,skds,0);
-            thread1.start();
+        List<SearchingThread> threads = new LinkedList<>();
+        int start = 0;
+
+        for (int i = 0; i < nThreads; i++) {
+            // Los primeros 'residue' hilos reciben un servidor extra,
+            // así se cubren TODOS los servidores sin dejar huecos y sin
+            // pasarnos del rango (par o impar, ambos casos quedan cubiertos).
+            int size = base + (i < residue ? 1 : 0);
+            int end = start + size;
+
+            SearchingThread t = new SearchingThread(start, end, ipaddress, this, skds);
+            threads.add(t);
+            t.start(); // arranca el hilo (llama a run() en paralelo)
+
+            start = end;
         }
-        // Managing the last scenario 
-        SearchingThread lastThread = new SearchingThread(numberServers-range,numberServers,ipaddress,skds,0);
-        lastThread.start(); 
-        
-        
-        for (int i=0;i<skds.getRegisteredServersCount() && ocurrencesCount<BLACK_LIST_ALARM_COUNT;i++){
-            checkedListsCount++;
-            
-            if (skds.isInBlackListServer(i, ipaddress)){
 
-                blackListOcurrences.add(i);
-                ocurrencesCount++;
+        // --- Aquí está el "wait" que pedía el README, sin escribirlo a mano ---
+        // join() bloquea el hilo principal hasta que ESE hilo termine su run().
+        // Internamente, join() está implementado con wait()/notifyAll() sobre
+        // el propio objeto Thread (la JVM notifica cuando el hilo muere).
+        // Por eso NO es sleep ni espera activa: el hilo principal queda
+        // bloqueado (no consume CPU) hasta que cada hijo termine.
+        //
+        // Nota clave: un hilo puede terminar "antes de tiempo" porque ya vio
+        // alarmThresholdReached()==true y salió con return en su run().
+        // join() sobre ese hilo retorna casi inmediatamente, sin problema.
+        for (SearchingThread t : threads) {
+            try {
+                t.join();
+            } catch (InterruptedException e) {
+                // Si el hilo principal es interrumpido mientras espera,
+                // marcamos la interrupción y salimos del método.
+                Thread.currentThread().interrupt();
+                return blackListOcurrences;
             }
         }
-        
-        if (ocurrencesCount>=BLACK_LIST_ALARM_COUNT){
+
+        // En este punto TODOS los hilos ya terminaron (o porque acabaron su
+        // segmento, o porque salieron temprano al llegar a la alarma).
+        if (getOcurrencesCount() >= BLACK_LIST_ALARM_COUNT) {
             skds.reportAsNotTrustworthy(ipaddress);
-        }
-        else{
+            LOG.log(Level.INFO, "HOST {0} Reported as NOT trustworthy", ipaddress);
+        } else {
             skds.reportAsTrustworthy(ipaddress);
-        }                
-        
-        LOG.log(Level.INFO, "Checked Black Lists:{0} of {1}", new Object[]{checkedListsCount, skds.getRegisteredServersCount()});
-        
+            LOG.log(Level.INFO, "HOST {0} Reported as trustworthy", ipaddress);
+        }
+
         return blackListOcurrences;
     }
-    private static final Logger LOG = Logger.getLogger(HostBlackListsValidator.class.getName());
-    
 }
